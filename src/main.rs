@@ -1,39 +1,37 @@
 mod controller;
 mod endpoints;
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc};
 use std::env;
 use std::error::Error;
-use actix_web::{web, App, HttpServer, rt};
+use actix_web::{web, App, HttpServer};
 use openssl::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
 use kube::Client;
 use env_logger;
 use log::info;
-use crate::controller::rbac_controller::{RBACController, run_controllers};
+use crate::controller::grant_controller::GrantController;
+use crate::controller::permission_controller::PermissionController;
+use crate::controller::rbac_controller::RBACController;
 use crate::endpoints::health::health;
-use crate::endpoints::grants::{get_grants, get_grant_counts};
-use crate::endpoints::permissions::get_permissions;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::init();
     let client_result = Client::try_default().await;
-    let controller = crate::controller::rbac_controller::new();
-    let rbac_controller = Arc::new(RwLock::new(controller));
     let client = match client_result{
         Ok(new_client) => new_client,
-        Err(result) => return std::io::Result::Err(std::io::Error::new(std::io::ErrorKind::Other,result.to_string())),
+        Err(result) => return Err(std::io::Error::new(std::io::ErrorKind::Other,result.to_string())),
     };
-    let thread_controller = Arc::clone(&rbac_controller);
-    // rbac_controllers need to run in the background to refresh memberships will server runs
-    rt::spawn(run_controllers(client, thread_controller));
+    let grant_controller = GrantController::new(client.clone());
+    let permission_controller = PermissionController::new(client.clone());
+    let rbac_controller = Arc::new(RBACController{
+        grant_controller,
+        permission_controller,
+    });
     let server = HttpServer::new( move || {
         App::new().
             app_data(web::Data::new(Arc::clone(&rbac_controller))).
-            route("/health", web::get().to(health)).
-            route("/grants/subject", web::post().to(get_grants)).
-            route("/grants/count", web::get().to(get_grant_counts)).
-            route("/permissions/subject", web::post().to(get_permissions))
+            route("/health", web::get().to(health))
     });
     match get_ssl_builder(){
         Ok(builder) => {

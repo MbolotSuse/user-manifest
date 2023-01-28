@@ -1,9 +1,8 @@
 use std::fmt;
 use std::fmt::{Formatter};
 use std::hash::Hash;
-use std::error::Error;
-use kube::api::Api;
-use k8s_openapi::api::rbac::v1::{PolicyRule, Role, ClusterRole, RoleBinding, ClusterRoleBinding, Subject};
+use k8s_openapi::api::rbac::v1::{Role, ClusterRole, RoleBinding, ClusterRoleBinding, Subject};
+use kube::{ResourceExt};
 
 /// Generic form of an identifier for an RBAC resource (role/cluster role). Does not contain rules
 /// To avoid re-storing rules in memory
@@ -15,6 +14,23 @@ pub struct RBACId{
     pub(crate) namespace: Option<String>,
     /// name of the rbac resource
     pub(crate) name: String,
+}
+
+impl RBACId {
+    pub fn from_role(role: &Role) -> RBACId{
+        RBACId{
+            rbac_type: IDType::Role,
+            namespace: role.metadata.namespace.clone(),
+            name: role.metadata.name.clone().unwrap_or_default(),
+        }
+    }
+    pub fn from_cluster_role(cluster_role: &ClusterRole) -> RBACId{
+        RBACId{
+            rbac_type: IDType::ClusterRole,
+            namespace: cluster_role.metadata.namespace.clone(),
+            name: cluster_role.metadata.name.clone().unwrap_or_default()
+        }
+    }
 }
 
 /// Object which grants RBAC permissions. Generic form of role_binding/cluster_role_binding
@@ -29,6 +45,57 @@ pub struct RBACGrant {
     pub(crate) name: String,
     /// the id of the permissions granted by this permissions grant
     pub(crate) permissions_id: RBACId,
+}
+
+impl RBACGrant {
+    pub fn from_role_binding(role_binding: &RoleBinding) -> RBACGrant{
+        let rbac_id = match role_binding.role_ref.kind.as_str(){
+            "Role" => RBACId{
+                    rbac_type: IDType::Role,
+                    namespace: role_binding.metadata.namespace.clone(),
+                    name: role_binding.role_ref.name.clone(),
+                },
+            "ClusterRole" => RBACId{
+                    rbac_type: IDType::ClusterRole,
+                    namespace: Some("".to_string()),
+                    name: role_binding.role_ref.name.clone(),
+            },
+            _ => RBACId{
+                rbac_type: IDType::Unknown,
+                namespace: role_binding.metadata.namespace.clone(),
+                name: role_binding.role_ref.name.clone(),
+            }
+        };
+
+        RBACGrant{
+            grant_type: GrantType::RoleBinding,
+            namespace: role_binding.metadata.namespace.clone(),
+            name: role_binding.metadata.name.clone().unwrap_or_default(),
+            permissions_id: rbac_id
+        }
+    }
+
+    pub fn from_cluster_role_binding(binding: &ClusterRoleBinding) -> RBACGrant{
+        let rbac_id = match binding.role_ref.kind.as_str(){
+            "ClusterRole" => RBACId{
+                rbac_type: IDType::ClusterRole,
+                namespace: binding.namespace(),
+                name: binding.role_ref.name.clone()
+            },
+            _ => RBACId{
+                rbac_type: IDType::Unknown,
+                namespace: binding.namespace(),
+                name: binding.name(),
+            }
+        };
+
+        RBACGrant{
+            grant_type: GrantType::ClusterRoleBinding,
+            namespace: binding.namespace(),
+            name: binding.name(),
+            permissions_id: rbac_id
+        }
+    }
 }
 
 /// Enum for the Types of Grants - Can be expanded to support other sources of permissions
@@ -56,6 +123,7 @@ impl fmt::Display for GrantType{
 pub enum IDType{
     Role,
     ClusterRole,
+    Unknown
 }
 
 impl fmt::Display for IDType{
@@ -67,6 +135,9 @@ impl fmt::Display for IDType{
             IDType::ClusterRole => {
                 write!(f, "ClusterRole")
             },
+            IDType::Unknown => {
+                write!(f, "Unknown")
+            }
         }
     }
 }
@@ -85,12 +156,34 @@ pub struct GrantSubject{
     pub api_group: String,
 }
 
+impl GrantSubject {
+    pub fn from_subject(subject: &Subject) -> GrantSubject{
+        let binding_kind = match subject.kind.as_str(){
+            "User" => SubjectKind::User,
+            "Group" => SubjectKind::Group,
+            "ServiceAccount" => SubjectKind::ServiceAccount,
+            _ => SubjectKind::Unknown,
+        };
+        let api_group = match subject.api_group.clone(){
+            Some(group) => group,
+            None => "".to_string(),
+        };
+        GrantSubject{
+            kind: binding_kind,
+            name: subject.name.clone(),
+            namespace: subject.namespace.clone(),
+            api_group
+        }
+    }
+}
+
 /// Enum for the ptotential kinds of subjects
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]
 pub enum SubjectKind{
     User,
     Group,
     ServiceAccount,
+    Unknown
 }
 
 impl fmt::Display for SubjectKind{
@@ -104,115 +197,10 @@ impl fmt::Display for SubjectKind{
             },
             SubjectKind::ServiceAccount => {
                 write!(f, "ServiceAccount")
-            }
+            },
+            SubjectKind::Unknown => {
+                write!(f, "Unknown")
+            },
         }
     }
-}
-
-pub(crate) async fn get_rules(grant: &RBACGrant, role_api: Api::<Role>, cluster_role_api: Api::<ClusterRole>) -> Result<Vec<PolicyRule>, Box<dyn Error>>{
-    if grant.permissions_id.rbac_type == IDType::Role {
-        let role_result = role_api.get(grant.permissions_id.name.as_str()).await;
-        match role_result{
-            Ok(role_result) => {
-                match role_result.rules {
-                    Some(role_rules) => Result::Ok(role_rules),
-                    None => Result::Ok(Vec::new()),
-                }
-            },
-            Err(role_result) => {
-                return Result::Err(format!("Unable to retrieve details for role {} due to error {:?}", grant.permissions_id.name, role_result).into());
-            }
-        }
-    }else if grant.permissions_id.rbac_type == IDType::ClusterRole {
-        let cluster_role_result = cluster_role_api.get(grant.permissions_id.name.as_str()).await;
-        // TODO: Technically, these are identical. However, the return type on cluster_role_api and role_api's get methods are different
-        // This could probably be solved with a macro
-        match cluster_role_result {
-            Ok(role_result) => {
-                match role_result.rules {
-                    Some(role_rules) => Result::Ok(role_rules),
-                    None => Result::Ok(Vec::new()),
-                }
-            },
-            Err(role_result) => {
-                return Result::Err(format!("Unable to retrieve details for role {} due to error {:?}", grant.permissions_id.name, role_result).into());
-            }
-        }
-    }else{
-        return Result::Err(format!("Invalid rbac type {} on grant {}", grant.permissions_id.rbac_type, grant.name).into())
-    }
-}
-
-pub(crate) fn convert_role_binding_to_grant(role_binding: &RoleBinding) -> Result<RBACGrant, Box<dyn Error>>{
-    let binding_name = match role_binding.metadata.name.clone(){
-        Some(name) => name,
-        None => return Result::Err("role binding was missing name".into())
-    };
-    let binding_namespace = match role_binding.metadata.namespace.clone(){
-        Some(namespace) => namespace,
-        None => return Result::Err("role binding namespace was missing".into())
-    };
-    let rbac_type;
-    let mut id_namespace: Option<String> = None;
-    match role_binding.role_ref.kind.as_str(){
-        "Role" => {
-            rbac_type = IDType::Role;
-            id_namespace = Some(binding_namespace.clone());
-        },
-        "ClusterRole" => {
-            rbac_type = IDType::ClusterRole;
-        },
-        _ =>{
-            return Result::Err(format!("role ref was for a {}, not a ClusterRole or Role", role_binding.role_ref.kind).into())
-        }
-    };
-
-    Result::Ok(RBACGrant{
-        grant_type: GrantType::RoleBinding,
-        namespace: Some(binding_namespace),
-        name: binding_name,
-        permissions_id: RBACId{
-            rbac_type,
-            namespace: id_namespace,
-            name: role_binding.role_ref.name.clone()
-        }
-    })
-}
-
-pub(crate) fn convert_cluster_role_binding_to_grant(cluster_role_binding: &ClusterRoleBinding) -> Result<RBACGrant, Box<dyn Error>> {
-    let binding_name = match cluster_role_binding.metadata.name.clone() {
-        Some(name) => name,
-        None => return Result::Err("cluster role binding was missing name".into())
-    };
-
-    Result::Ok(RBACGrant {
-        grant_type: GrantType::ClusterRoleBinding,
-        namespace: None,
-        name: binding_name,
-        permissions_id: RBACId {
-            rbac_type: IDType::ClusterRole,
-            namespace: None,
-            name: cluster_role_binding.role_ref.name.clone()
-        }
-    })
-}
-
-pub(crate) fn convert_to_grant_subject(subject: Subject) -> Result<GrantSubject, Box<dyn Error>>{
-    let binding_kind = match subject.kind.as_str(){
-        "User" => SubjectKind::User,
-        "Group" => SubjectKind::Group,
-        "ServiceAccount" => SubjectKind::ServiceAccount,
-        _ => return Result::Err(format!("kind {} was not a known subject kind", subject.kind).into()),
-    };
-    let api_group = match subject.api_group{
-        Some(group) => group,
-        None => "".to_string(),
-    };
-
-    Result::Ok(GrantSubject{
-        kind: binding_kind,
-        name: subject.name.clone(),
-        namespace: subject.namespace.clone(),
-        api_group
-    })
 }
