@@ -5,6 +5,7 @@ use std::sync::{Arc};
 use std::env;
 use std::error::Error;
 use actix_web::{web, App, HttpServer};
+use endpoints::grants::get_all_grants;
 use openssl::ssl::{SslAcceptor, SslAcceptorBuilder, SslFiletype, SslMethod};
 use kube::Client;
 use env_logger;
@@ -31,10 +32,12 @@ async fn main() -> std::io::Result<()> {
     let server = HttpServer::new( move || {
         App::new().
             app_data(web::Data::new(Arc::clone(&rbac_controller))).
-            route("/health", web::get().to(health))
+            route("/health", web::get().to(health)).
+            route("/grants", web::get().to(get_all_grants))
     });
     match get_ssl_builder(){
         Ok(builder) => {
+            info!("Using openssl");
             server.bind_openssl("127.0.0.1:8080", builder)?
                 .run()
                 .await

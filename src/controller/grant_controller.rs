@@ -95,6 +95,16 @@ impl Shared {
             None => None,
         }
     }
+
+    fn remove_grant(&self, grant: &RBACGrant){
+        let mut state = self.state.lock().unwrap();
+        let state = &mut *state;
+        let default: HashSet<GrantSubject> = HashSet::new();
+        let subjects = match state.grant_to_user.get(grant){
+            Some(subs) => subs,
+            None => &default,
+        };
+    }
 }
 
 async fn refresh_role_bindings(client: Client, shared: Arc<Shared>){

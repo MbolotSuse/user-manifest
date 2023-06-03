@@ -1,6 +1,6 @@
-use crate::controller::rbac_grant::{RBACId};
+use crate::controller::rbac_grant::{RBACId, IDType};
 use k8s_openapi::api::rbac::v1::{PolicyRule, Role, ClusterRole};
-use kube::{api::{Api, ListParams}, runtime::{watcher, WatchStreamExt}, Client};
+use kube::{api::{Api, ListParams}, runtime::watcher, Client};
 use log::info;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -70,45 +70,73 @@ impl Shared {
         let state = &mut *state;
         state.id_to_permissions.insert(id.clone(), rules.clone());
     }
+
+    fn remove_all_of_type(&self, id_type: IDType){
+        // as outlined in the mini-redis, necessary to acquire lock/access state
+        let mut state =  self.state.lock().unwrap();
+        let state = &mut *state;
+        // keep only the entries which do not have the specified id type (or remove all that are
+        // of the specified id type)
+        state.id_to_permissions.retain(|k, _| k.rbac_type != id_type);
+    }
 }
 
 async fn refresh_roles(client: Client, shared: Arc<Shared>){
     info!("Starting role controller");
     let role_api = Api::<Role>::all(client.clone());
-    let twatcher = watcher(role_api, ListParams::default());
-    pin_mut!(twatcher);
-    while let Ok(Some(event)) = twatcher.try_next().await{
-       match event{
-           Event::Deleted(deleted_role) => {},
-           Event::Applied(changed_role) => {},
-           Event::Restarted(roles) => {},
-       }
-    }
-    let role_watcher = watcher(role_api, ListParams::default()).touched_objects();
+    let role_watcher = watcher(role_api, ListParams::default());
     pin_mut!(role_watcher);
     while let Ok(Some(event)) = role_watcher.try_next().await{
-        let rbac_id = RBACId::from_role(&event);
-        // remove the current record so we can update the permissions
-        shared.remove_permission_id(&rbac_id);
-        // don't update permissions if we are for a deleting role or a role without rules
-        if event.metadata.deletion_timestamp.is_none() && event.rules.is_some(){
-            shared.store_permission_id(&rbac_id, &event.rules.unwrap());
-        }
+       match event{
+           Event::Applied(role) => {
+               let rbac_id = RBACId::from_role(&role);
+               // remove the current permission and store the new ones in case our permissions changed
+               shared.remove_permission_id(&rbac_id);
+               shared.store_permission_id(&rbac_id, &role.rules.unwrap_or_default());
+           },
+           Event::Restarted(roles) => {
+               // watch restarted, remove all current records and refill with new ones
+               shared.remove_all_of_type(IDType::Role);
+               for role in roles{
+                   let rbac_id = RBACId::from_role(&role);
+                   shared.store_permission_id(&rbac_id, &role.rules.unwrap_or_default());
+               }
+           },
+           Event::Deleted(role) => {
+               // remove our current record of this role since it's now deleted
+               let rbac_id = RBACId::from_role(&role);
+               shared.remove_permission_id(&rbac_id);
+           },
+       }
     }
 }
 
 async fn refresh_cluster_role(client: Client, shared: Arc<Shared>){
     info!("Starting cluster role controller");
-    let role_api = Api::<ClusterRole>::all(client.clone());
-    let role_watcher = watcher(role_api, ListParams::default()).touched_objects();
-    pin_mut!(role_watcher);
-    while let Ok(Some(event)) = role_watcher.try_next().await {
-        let rbac_id = RBACId::from_cluster_role(&event);
-        // remove the current record so we can update the permissions
-        shared.remove_permission_id(&rbac_id);
-        // don't update permissions if we are for a deleting role or a role without rules
-        if event.metadata.deletion_timestamp.is_none() && event.rules.is_some(){
-            shared.store_permission_id(&rbac_id, &event.rules.unwrap());
-        }
+    let cluster_role_api = Api::<ClusterRole>::all(client.clone());
+    let cluster_role_watcher = watcher(cluster_role_api, ListParams::default());
+    pin_mut!(cluster_role_watcher);
+    while let Ok(Some(event)) = cluster_role_watcher.try_next().await{
+       match event{
+           Event::Applied(cluster_role) => {
+               let rbac_id = RBACId::from_cluster_role(&cluster_role);
+               // remove stale permission and re-add
+               shared.remove_permission_id(&rbac_id);
+               shared.store_permission_id(&rbac_id, &cluster_role.rules.unwrap_or_default())
+           },
+           Event::Restarted(cluster_roles) => {
+               // watch restarted, purge current events and refill
+               shared.remove_all_of_type(IDType::ClusterRole);
+               for cluster_role in cluster_roles{
+                   let rbac_id = RBACId::from_cluster_role(&cluster_role);
+                   shared.store_permission_id(&rbac_id, &cluster_role.rules.unwrap_or_default());
+               }
+           },
+           Event::Deleted(cluster_role) => {
+               // remove our current record since this permission is deleted
+               let rbac_id = RBACId::from_cluster_role(&cluster_role);
+               shared.remove_permission_id(&rbac_id);
+           },
+       }
     }
 }

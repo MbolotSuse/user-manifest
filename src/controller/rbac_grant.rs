@@ -1,8 +1,8 @@
 use std::fmt;
-use std::fmt::{Formatter};
+use std::fmt::Formatter;
 use std::hash::Hash;
 use k8s_openapi::api::rbac::v1::{Role, ClusterRole, RoleBinding, ClusterRoleBinding, Subject};
-use kube::{ResourceExt};
+use kube::ResourceExt;
 
 /// Generic form of an identifier for an RBAC resource (role/cluster role). Does not contain rules
 /// To avoid re-storing rules in memory
@@ -36,7 +36,7 @@ impl RBACId {
 /// Object which grants RBAC permissions. Generic form of role_binding/cluster_role_binding
 #[derive(Eq, PartialEq, Hash, Clone, Debug)]
 pub struct RBACGrant {
-    //TODO: Custom hash (and maybe eq?) function which ignores permissions_id.
+    // TODO: Custom hash (and maybe eq?) function which ignores permissions_id.
     /// type of resource which grants RBAC permissions - e.x. role_binding or cluster_role_binding
     pub(crate) grant_type: GrantType,
     /// namespace which the permission grant occurs in - may be none if the grant is cluster-wide
