@@ -8,8 +8,9 @@ edition = "2021"
 [dependencies]
 kube = {version = "0.73.1", features = ["runtime"] }
 k8s-openapi = { version = "0.15.0", features = ["v1_23"]}
-actix-web = { version = "4.1.0", features = ["openssl"]}
-openssl = { version = "0.10.46", features = ["v110"]}
+actix-web = { version = "4.3.0", features = ["rustls"]}
+rustls = "0.20.2"
+rustls-pemfile = "1"
 serde_json = "1.0.81"
 serde = { version = "1.0", features = ["derive"] }
 futures = "0.3.21"
